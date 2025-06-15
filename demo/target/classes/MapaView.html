@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Rotas Seguras - Maringá</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="MapaView.css" />
+</head>
+<body>
+<div class="header">
+  <div class="logo">Rotas Seguras</div>
+  <div class="profile">
+    <img src="img.png" alt="Perfil">
+    <span>Usuário</span>
+  </div>
+</div>
+
+<div class="container">
+  <div id="map"></div>
+
+  <div class="sidebar">
+
+    <div class="post-area">
+      <h3>Origem e Destino</h3>
+      <label>Origem:</label>
+      <input type="text" id="origemInput" placeholder="Digite um endereço em Maringá">
+      <label>Destino:</label>
+      <input type="text" id="destinoInput" placeholder="Digite um endereço em Maringá">
+      <button class="action-btn" id="traçarRotaBtn" onclick="buscarCoordenadas()">Traçar Rota</button>
+      <button class="action-btn" id="limparMapaBtn" onclick="limparMapa()">Limpar Mapa</button>
+    </div>
+
+    <div class="feed">
+      <h3>Avaliações</h3>
+      <h4 id="tituloAvaliacaoRota" style="margin-top: 5px; color: #3171f6;"></h4>
+      <div id="feedContent"></div>
+    </div>
+
+    <div id="avaliacaoArea" style="display: none;" class="post-area">
+      <h3>Avaliar Trecho Selecionado</h3>
+      <div id="infoRotaSelecionada" style="margin-bottom: 10px; font-weight: bold; color: #3171f6;"></div>
+      <label>Segurança:</label>
+      <input id="seg" type="number" min="0" max="5" step="0.1">
+      <label>Iluminação:</label>
+      <input id="ilu" type="number" min="0" max="5" step="0.1">
+      <label>Tráfego:</label>
+      <input id="traf" type="number" min="0" max="5" step="0.1">
+      <label>Comentário/ Sugestão de melhoria:</label>
+      <input id="comentario" type="text" placeholder="Escreva um comentário">
+      <button class="action-btn" id="enviarAvaliacaoBtn" onclick="enviarAvaliacao()" disabled>Enviar Avaliação</button>
+    </div>
+
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="MapaView.js"></script>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'94feecb90efd0301',t:'MTc0OTk1NzU1NC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>
