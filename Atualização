@@ -1,0 +1,621 @@
+package com.rotasegura.application.service;
+
+import com.rotasegura.domain.model.*;
+import com.rotasegura.domain.vo.ScoreSeguranca;
+import com.rotasegura.domain.vo.Endereco;
+import com.rotasegura.application.dto.*;
+import com.rotasegura.application.mapper.*;
+import com.rotasegura.application.validator.*;
+import com.rotasegura.infrastructure.persistence.*;
+import com.rotasegura.infrastructure.exception.*;
+import com.rotasegura.infrastructure.logging.LoggerUtil;
+
+import java.time.LocalDateTime;
+import java.time.LocalDate;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * CHANGE 001 - Classe principal de gerenciamento de rotas seguras
+ * CHANGE 002 - Integra avaliacoes, calculos de score e recomendacoes
+ * CHANGE 003 - Implementa padrao Singleton para controle centralizado
+ * CHANGE 004 - Adiciona cache em memoria para rotas frequentes
+ * CHANGE 005 - Suporta multiplos criterios de seguranca
+ */
+public class GerenciadorRotaSegura {
+
+    // CHANGE 006 - Constantes de configuracao
+    private static final int CACHE_MAX_SIZE = 100;
+    private static final double PESO_ILUMINACAO = 0.35;
+    private static final double PESO_TRAFEGO = 0.25;
+    private static final double PESO_SEGURANCA = 0.40;
+    private static final double NOTA_MINIMA_SEGURA = 3.0;
+    private static final int MAX_ROTAS_ALTERNATIVAS = 5;
+
+    // CHANGE 007 - Instancia Singleton
+    private static GerenciadorRotaSegura instancia;
+
+    // CHANGE 008 - Repositorios injetados
+    private final AvaliacaoRepository avaliacaoRepo;
+    private final RotaRepository rotaRepo;
+    private final TrechoRepository trechoRepo;
+    private final ComentarioRepository comentarioRepo;
+    private final HistoricoRepository historicoRepo;
+
+    // CHANGE 009 - Servicos auxiliares
+    private final CalculadoraRotaService calculadora;
+    private final EstatisticaService estatisticaService;
+    private final NotificacaoService notificacaoService;
+
+    // CHANGE 010 - Cache de rotas calculadas
+    private final LinkedHashMap<String, RotaDTO> cacheRotas;
+
+    // CHANGE 011 - Lista de observadores
+    private final List<RotaSeguraObserver> observers;
+
+    // CHANGE 012 - Logger
+    private final LoggerUtil logger;
+
+    /**
+     * CHANGE 013 - Interface para observadores do sistema
+     */
+    public interface RotaSeguraObserver {
+        void onRotaCalculada(RotaDTO rota);
+        void onAlertaGerado(Alerta alerta);
+        void onAvaliacaoRecebida(Avaliacao avaliacao);
+    }
+
+    /**
+     * CHANGE 014 - Construtor privado (Singleton)
+     */
+    private GerenciadorRotaSegura(AvaliacaoRepository avaliacaoRepo,
+                                   RotaRepository rotaRepo,
+                                   TrechoRepository trechoRepo,
+                                   ComentarioRepository comentarioRepo,
+                                   HistoricoRepository historicoRepo) {
+        this.avaliacaoRepo = avaliacaoRepo;
+        this.rotaRepo = rotaRepo;
+        this.trechoRepo = trechoRepo;
+        this.comentarioRepo = comentarioRepo;
+        this.historicoRepo = historicoRepo;
+        this.calculadora = new CalculadoraRotaService();
+        this.estatisticaService = new EstatisticaService();
+        this.notificacaoService = new DesktopNotificationServiceImpl();
+        this.cacheRotas = new LinkedHashMap<String, RotaDTO>(CACHE_MAX_SIZE, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, RotaDTO> eldest) {
+                return size() > CACHE_MAX_SIZE;
+            }
+        };
+        this.observers = new ArrayList<>();
+        this.logger = new LoggerUtil(GerenciadorRotaSegura.class);
+        logger.info("GerenciadorRotaSegura inicializado com sucesso");
+    }
+
+    /**
+     * CHANGE 015 - Metodo factory para obter instancia
+     */
+    public static synchronized GerenciadorRotaSegura getInstance(
+            AvaliacaoRepository avaliacaoRepo,
+            RotaRepository rotaRepo,
+            TrechoRepository trechoRepo,
+            ComentarioRepository comentarioRepo,
+            HistoricoRepository historicoRepo) {
+        if (instancia == null) {
+            instancia = new GerenciadorRotaSegura(avaliacaoRepo, rotaRepo, trechoRepo, comentarioRepo, historicoRepo);
+        }
+        return instancia;
+    }
+
+    /**
+     * CHANGE 016 - Metodo para resetar instancia (util em testes)
+     */
+    public static synchronized void resetInstance() {
+        instancia = null;
+    }
+
+    /**
+     * CHANGE 017 - Registra um observador
+     */
+    public void adicionarObserver(RotaSeguraObserver observer) {
+        if (observer != null && !observers.contains(observer)) {
+            observers.add(observer);
+            logger.info("Observer registrado: " + observer.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * CHANGE 018 - Remove um observador
+     */
+    public void removerObserver(RotaSeguraObserver observer) {
+        observers.remove(observer);
+        logger.info("Observer removido: " + (observer != null ? observer.getClass().getSimpleName() : "null"));
+    }
+
+    /**
+     * CHANGE 019 - Notifica todos os observers sobre rota calculada
+     */
+    private void notificarRotaCalculada(RotaDTO rota) {
+        for (RotaSeguraObserver obs : new ArrayList<>(observers)) {
+            try {
+                obs.onRotaCalculada(rota);
+            } catch (Exception e) {
+                logger.error("Erro ao notificar observer: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * CHANGE 020 - Notifica todos os observers sobre alerta
+     */
+    private void notificarAlerta(Alerta alerta) {
+        for (RotaSeguraObserver obs : new ArrayList<>(observers)) {
+            try {
+                obs.onAlertaGerado(alerta);
+            } catch (Exception e) {
+                logger.error("Erro ao notificar alerta: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * CHANGE 021 - Calcula a melhor rota segura entre dois pontos
+     */
+    public RotaDTO calcularMelhorRota(Coordenada origem, Coordenada destino, TipoTransporte transporte) {
+        // CHANGE 022 - Valida entrada
+        CoordenadaValidator.validar(origem);
+        CoordenadaValidator.validar(destino);
+
+        // CHANGE 023 - Gera chave de cache
+        String chaveCache = gerarChaveCache(origem, destino, transporte);
+
+        // CHANGE 024 - Verifica cache
+        if (cacheRotas.containsKey(chaveCache)) {
+            logger.info("Rota recuperada do cache: " + chaveCache);
+            return cacheRotas.get(chaveCache);
+        }
+
+        // CHANGE 025 - Busca trechos disponiveis
+        List<Trecho> trechos = trechoRepo.buscarTrechosNaRegiao(origem, destino);
+        if (trechos.isEmpty()) {
+            throw new RecursoNaoEncontradoException("Nenhum trecho encontrado na regiao especificada");
+        }
+
+        // CHANGE 026 - Filtra por tipo de transporte
+        List<Trecho> trechosCompativeis = filtrarPorTransporte(trechos, transporte);
+
+        // CHANGE 027 - Calcula scores de seguranca
+        Map<Trecho, ScoreSeguranca> scores = calcularScores(trechosCompativeis);
+
+        // CHANGE 028 - Aplica algoritmo de rota
+        List<Trecho> rotaOtima = calculadora.encontrarRotaOtima(origem, destino, trechosCompativeis, scores);
+
+        // CHANGE 029 - Calcula distancia total
+        double distanciaTotal = calcularDistanciaTotal(rotaOtima);
+
+        // CHANGE 030 - Calcula tempo estimado
+        int tempoEstimadoMinutos = calcularTempoEstimado(rotaOtima, transporte);
+
+        // CHANGE 031 - Calcula score medio da rota
+        double scoreMedio = calcularScoreMedio(rotaOtima, scores);
+
+        // CHANGE 032 - Verifica alertas no caminho
+        List<Alerta> alertasNoCaminho = verificarAlertas(rotaOtima);
+
+        // CHANGE 033 - Monta DTO de resposta
+        RotaDTO rotaDTO = new RotaDTO();
+        rotaDTO.setOrigem(CoordenadaMapper.toDTO(origem));
+        rotaDTO.setDestino(CoordenadaMapper.toDTO(destino));
+        rotaDTO.setPontos(rotaOtima.stream().map(TrechoMapper::toDTO).collect(Collectors.toList()));
+        rotaDTO.setDistanciaTotalKm(distanciaTotal);
+        rotaDTO.setTempoEstimadoMinutos(tempoEstimadoMinutos);
+        rotaDTO.setScoreSeguranca(scoreMedio);
+        rotaDTO.setTipoTransporte(transporte);
+        rotaDTO.setDataHoraCalculo(LocalDateTime.now());
+        rotaDTO.setAlertasNoCaminho(alertasNoCaminho);
+        rotaDTO.setSegura(scoreMedio >= NOTA_MINIMA_SEGURA);
+
+        // CHANGE 034 - Salva no cache
+        cacheRotas.put(chaveCache, rotaDTO);
+
+        // CHANGE 035 - Notifica observers
+        notificarRotaCalculada(rotaDTO);
+
+        // CHANGE 036 - Log
+        logger.info(String.format("Rota calculada: %.2f km, %.1f min, score %.2f",
+                distanciaTotal, tempoEstimadoMinutos, scoreMedio));
+
+        return rotaDTO;
+    }
+
+    /**
+     * CHANGE 037 - Calcula rotas alternativas
+     */
+    public List<RotaDTO> calcularRotasAlternativas(Coordenada origem, Coordenada destino, TipoTransporte transporte) {
+        List<RotaDTO> alternativas = new ArrayList<>();
+
+        // CHANGE 038 - Rota principal
+        RotaDTO principal = calcularMelhorRota(origem, destino, transporte);
+        alternativas.add(principal);
+
+        // CHANGE 039 - Gera variacoes excluindo trechos perigosos
+        List<Trecho> todosTrechos = trechoRepo.buscarTrechosNaRegiao(origem, destino);
+        List<Trecho> trechosCompativeis = filtrarPorTransporte(todosTrechos, transporte);
+
+        // CHANGE 040 - Para cada trecho perigoso, tenta rota alternativa
+        int count = 0;
+        for (Trecho trecho : trechosCompativeis) {
+            if (count >= MAX_ROTAS_ALTERNATIVAS - 1) break;
+
+            List<Trecho> semTrecho = new ArrayList<>(trechosCompativeis);
+            semTrecho.remove(trecho);
+
+            try {
+                Map<Trecho, ScoreSeguranca> scores = calcularScores(semTrecho);
+                List<Trecho> rotaAlt = calculadora.encontrarRotaOtima(origem, destino, semTrecho, scores);
+
+                double scoreMedio = calcularScoreMedio(rotaAlt, scores);
+                double distancia = calcularDistanciaTotal(rotaAlt);
+                int tempo = calcularTempoEstimado(rotaAlt, transporte);
+
+                RotaDTO altDTO = new RotaDTO();
+                altDTO.setOrigem(CoordenadaMapper.toDTO(origem));
+                altDTO.setDestino(CoordenadaMapper.toDTO(destino));
+                altDTO.setPontos(rotaAlt.stream().map(TrechoMapper::toDTO).collect(Collectors.toList()));
+                altDTO.setDistanciaTotalKm(distancia);
+                altDTO.setTempoEstimadoMinutos(tempo);
+                altDTO.setScoreSeguranca(scoreMedio);
+                altDTO.setTipoTransporte(transporte);
+                altDTO.setDataHoraCalculo(LocalDateTime.now());
+                altDTO.setSegura(scoreMedio >= NOTA_MINIMA_SEGURA);
+                altDTO.setAlternativa(true);
+
+                alternativas.add(altDTO);
+                count++;
+            } catch (Exception e) {
+                logger.warn("Nao foi possivel gerar alternativa excluindo trecho: " + trecho.getId());
+            }
+        }
+
+        // CHANGE 041 - Ordena por score de seguranca
+        alternativas.sort((a, b) -> Double.compare(b.getScoreSeguranca(), a.getScoreSeguranca()));
+
+        return alternativas;
+    }
+
+    /**
+     * CHANGE 042 - Registra uma nova avaliacao comunitaria
+     */
+    public AvaliacaoDTO registrarAvaliacao(AvaliacaoDTO dto, Long usuarioId) {
+        // CHANGE 043 - Valida DTO
+        AvaliacaoValidator.validar(dto);
+
+        // CHANGE 044 - Converte para entidade
+        Avaliacao avaliacao = AvaliacaoMapper.toEntity(dto);
+        avaliacao.setUsuarioId(usuarioId);
+        avaliacao.setDataHora(LocalDateTime.now());
+        avaliacao.setStatus(StatusTrecho.ATIVO);
+
+        // CHANGE 045 - Salva no repositorio
+        Avaliacao salva = avaliacaoRepo.salvar(avaliacao);
+
+        // CHANGE 046 - Atualiza score do trecho
+        atualizarScoreTrecho(salva.getTrechoId());
+
+        // CHANGE 047 - Notifica observers
+        for (RotaSeguraObserver obs : new ArrayList<>(observers)) {
+            try {
+                obs.onAvaliacaoRecebida(salva);
+            } catch (Exception e) {
+                logger.error("Erro ao notificar avaliacao: " + e.getMessage());
+            }
+        }
+
+        // CHANGE 048 - Limpa cache afetado
+        limparCachePorTrecho(salva.getTrechoId());
+
+        // CHANGE 049 - Log
+        logger.info("Avaliacao registrada: trecho=" + salva.getTrechoId() + ", nota=" + salva.getNotaGeral());
+
+        return AvaliacaoMapper.toDTO(salva);
+    }
+
+    /**
+     * CHANGE 050 - Obtem estatisticas de um bairro/regiao
+     */
+    public Map<String, Object> obterEstatisticasRegiao(Coordenada centro, double raioKm) {
+        Map<String, Object> stats = new HashMap<>();
+
+        // CHANGE 051 - Busca trechos na regiao
+        List<Trecho> trechos = trechoRepo.buscarPorProximidade(centro, raioKm);
+
+        // CHANGE 052 - Calcula media geral
+        double mediaGeral = trechos.stream()
+                .mapToDouble(Trecho::getScoreMedio)
+                .average()
+                .orElse(0.0);
+
+        // CHANGE 053 - Calcula distribuicao de scores
+        Map<String, Long> distribuicao = trechos.stream()
+                .collect(Collectors.groupingBy(
+                        t -> classificarScore(t.getScoreMedio()),
+                        Collectors.counting()
+                ));
+
+        // CHANGE 054 - Trechos mais seguros
+        List<Trecho> maisSeguros = trechos.stream()
+                .sorted(Comparator.comparingDouble(Trecho::getScoreMedio).reversed())
+                .limit(10)
+                .collect(Collectors.toList());
+
+        // CHANGE 055 - Trechos menos seguros
+        List<Trecho> menosSeguros = trechos.stream()
+                .sorted(Comparator.comparingDouble(Trecho::getScoreMedio))
+                .limit(10)
+                .collect(Collectors.toList());
+
+        // CHANGE 056 - Total de avaliacoes
+        long totalAvaliacoes = trechos.stream().mapToLong(Trecho::getTotalAvaliacoes).sum();
+
+        // CHANGE 057 - Preenche mapa de resposta
+        stats.put("mediaGeral", String.format("%.2f", mediaGeral));
+        stats.put("totalTrechos", trechos.size());
+        stats.put("totalAvaliacoes", totalAvaliacoes);
+        stats.put("distribuicao", distribuicao);
+        stats.put("maisSeguros", maisSeguros.stream().map(TrechoMapper::toDTO).collect(Collectors.toList()));
+        stats.put("menosSeguros", menosSeguros.stream().map(TrechoMapper::toDTO).collect(Collectors.toList()));
+        stats.put("raioKm", raioKm);
+        stats.put("dataConsulta", LocalDateTime.now().toString());
+
+        return stats;
+    }
+
+    /**
+     * CHANGE 058 - Gera alerta para trecho perigoso
+     */
+    public Alerta gerarAlerta(Long trechoId, String tipo, String mensagem) {
+        Trecho trecho = trechoRepo.buscarPorId(trechoId)
+                .orElseThrow(() -> new RecursoNaoEncontradoException("Trecho nao encontrado: " + trechoId));
+
+        Alerta alerta = new Alerta();
+        alerta.setTrechoId(trechoId);
+        alerta.setTipo(tipo);
+        alerta.setMensagem(mensagem);
+        alerta.setDataHora(LocalDateTime.now());
+        alerta.setAtivo(true);
+
+        // CHANGE 059 - Notifica
+        notificarAlerta(alerta);
+        notificacaoService.enviarNotificacao("Alerta de Seguranca", mensagem);
+
+        logger.warn("Alerta gerado para trecho " + trechoId + ": " + tipo);
+        return alerta;
+    }
+
+    /**
+     * CHANGE 060 - Registra rota percorrida no historico
+     */
+    public void registrarRotaPercorrida(Long usuarioId, RotaDTO rota, int tempoRealMinutos) {
+        HistoricoRota historico = new HistoricoRota();
+        historico.setUsuarioId(usuarioId);
+        historico.setRotaId(rota.getId());
+        historico.setDataPercorrida(LocalDateTime.now());
+        historico.setTempoEstimadoMinutos(rota.getTempoEstimadoMinutos());
+        historico.setTempoRealMinutos(tempoRealMinutos);
+        historico.setDistanciaKm(rota.getDistanciaTotalKm());
+        historico.setScoreSeguranca(rota.getScoreSeguranca());
+        historico.setTipoTransporte(rota.getTipoTransporte());
+
+        historicoRepo.salvar(historico);
+        logger.info("Rota percorrida registrada para usuario " + usuarioId);
+    }
+
+    /**
+     * CHANGE 061 - Busca historico de rotas do usuario
+     */
+    public List<HistoricoRotaDTO> buscarHistoricoUsuario(Long usuarioId, LocalDate dataInicio, LocalDate dataFim) {
+        List<HistoricoRota> historicos = historicoRepo.buscarPorUsuarioEPeriodo(usuarioId, dataInicio, dataFim);
+        return historicos.stream()
+                .map(h -> {
+                    HistoricoRotaDTO dto = new HistoricoRotaDTO();
+                    dto.setId(h.getId());
+                    dto.setDataPercorrida(h.getDataPercorrida());
+                    dto.setDistanciaKm(h.getDistanciaKm());
+                    dto.setTempoRealMinutos(h.getTempoRealMinutos());
+                    dto.setScoreSeguranca(h.getScoreSeguranca());
+                    dto.setTipoTransporte(h.getTipoTransporte());
+                    return dto;
+                })
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * CHANGE 062 - Limpa todo o cache de rotas
+     */
+    public void limparCache() {
+        cacheRotas.clear();
+        logger.info("Cache de rotas limpo");
+    }
+
+    /**
+     * CHANGE 063 - Obtem estatisticas do cache
+     */
+    public Map<String, Object> obterEstatisticasCache() {
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("tamanhoAtual", cacheRotas.size());
+        stats.put("tamanhoMaximo", CACHE_MAX_SIZE);
+        stats.put("chaves", new ArrayList<>(cacheRotas.keySet()));
+        return stats;
+    }
+
+    // ========== METODOS PRIVADOS ==========
+
+    /**
+     * CHANGE 064 - Gera chave unica para cache
+     */
+    private String gerarChaveCache(Coordenada origem, Coordenada destino, TipoTransporte transporte) {
+        return String.format("%.6f_%.6f_%.6f_%.6f_%s",
+                origem.getLatitude(), origem.getLongitude(),
+                destino.getLatitude(), destino.getLongitude(),
+                transporte.name());
+    }
+
+    /**
+     * CHANGE 065 - Filtra trechos compativeis com transporte
+     */
+    private List<Trecho> filtrarPorTransporte(List<Trecho> trechos, TipoTransporte transporte) {
+        return trechos.stream()
+                .filter(t -> t.isAcessivelPor(transporte))
+                .filter(t -> t.getStatus() != StatusTrecho.INTERDITADO)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * CHANGE 066 - Calcula scores de seguranca para trechos
+     */
+    private Map<Trecho, ScoreSeguranca> calcularScores(List<Trecho> trechos) {
+        Map<Trecho, ScoreSeguranca> scores = new HashMap<>();
+        for (Trecho trecho : trechos) {
+            List<Avaliacao> avaliacoes = avaliacaoRepo.buscarPorTrecho(trecho.getId());
+            if (avaliacoes.isEmpty()) {
+                scores.put(trecho, new ScoreSeguranca(3.0, 3.0, 3.0));
+                continue;
+            }
+
+            double mediaIluminacao = avaliacoes.stream().mapToDouble(Avaliacao::getNotaIluminacao).average().orElse(3.0);
+            double mediaTrafego = avaliacoes.stream().mapToDouble(Avaliacao::getNotaTrafego).average().orElse(3.0);
+            double mediaSeguranca = avaliacoes.stream().mapToDouble(Avaliacao::getNotaSeguranca).average().orElse(3.0);
+
+            scores.put(trecho, new ScoreSeguranca(mediaIluminacao, mediaTrafego, mediaSeguranca));
+        }
+        return scores;
+    }
+
+    /**
+     * CHANGE 067 - Calcula distancia total da rota (Haversine)
+     */
+    private double calcularDistanciaTotal(List<Trecho> trechos) {
+        double total = 0.0;
+        for (Trecho trecho : trechos) {
+            total += calcularDistanciaHaversine(
+                    trecho.getCoordenadaInicio(), trecho.getCoordenadaFim());
+        }
+        return total;
+    }
+
+    /**
+     * CHANGE 068 - Formula de Haversine
+     */
+    private double calcularDistanciaHaversine(Coordenada a, Coordenada b) {
+        final int RAIO_TERRA_KM = 6371;
+        double lat1 = Math.toRadians(a.getLatitude());
+        double lat2 = Math.toRadians(b.getLatitude());
+        double deltaLat = Math.toRadians(b.getLatitude() - a.getLatitude());
+        double deltaLon = Math.toRadians(b.getLongitude() - a.getLongitude());
+
+        double c = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+                Math.cos(lat1) * Math.cos(lat2) *
+                        Math.sin(deltaLon / 2) * Math.sin(deltaLon / 2);
+        double d = 2 * Math.atan2(Math.sqrt(c), Math.sqrt(1 - c));
+        return RAIO_TERRA_KM * d;
+    }
+
+    /**
+     * CHANGE 069 - Calcula tempo estimado baseado no transporte
+     */
+    private int calcularTempoEstimado(List<Trecho> trechos, TipoTransporte transporte) {
+        double distanciaTotal = calcularDistanciaTotal(trechos);
+        double velocidadeMedia;
+        switch (transporte) {
+            case PEDESTRE: velocidadeMedia = 5.0; break;
+            case BICICLETA: velocidadeMedia = 15.0; break;
+            case PATINETE: velocidadeMedia = 12.0; break;
+            case PATINS: velocidadeMedia = 10.0; break;
+            case CADEIRA_RODAS: velocidadeMedia = 4.0; break;
+            default: velocidadeMedia = 5.0;
+        }
+        return (int) Math.ceil((distanciaTotal / velocidadeMedia) * 60);
+    }
+
+    /**
+     * CHANGE 070 - Calcula score medio ponderado da rota
+     */
+    private double calcularScoreMedio(List<Trecho> trechos, Map<Trecho, ScoreSeguranca> scores) {
+        if (trechos.isEmpty()) return 0.0;
+        double soma = 0.0;
+        for (Trecho trecho : trechos) {
+            ScoreSeguranca score = scores.getOrDefault(trecho, new ScoreSeguranca(3.0, 3.0, 3.0));
+            double mediaTrecho = score.getNotaIluminacao() * PESO_ILUMINACAO +
+                    score.getNotaTrafego() * PESO_TRAFEGO +
+                    score.getNotaSeguranca() * PESO_SEGURANCA;
+            soma += mediaTrecho;
+        }
+        return soma / trechos.size();
+    }
+
+    /**
+     * CHANGE 071 - Verifica alertas ativos nos trechos
+     */
+    private List<Alerta> verificarAlertas(List<Trecho> trechos) {
+        List<Alerta> alertas = new ArrayList<>();
+        for (Trecho trecho : trechos) {
+            // Simulacao - em producao buscaria do repositorio
+            if (trecho.getScoreMedio() < 2.0) {
+                Alerta alerta = new Alerta();
+                alerta.setTrechoId(trecho.getId());
+                alerta.setTipo("SEGURANCA_BAIXA");
+                alerta.setMensagem("Trecho com baixa seguranca detectado");
+                alerta.setDataHora(LocalDateTime.now());
+                alertas.add(alerta);
+            }
+        }
+        return alertas;
+    }
+
+    /**
+     * CHANGE 072 - Atualiza score medio de um trecho
+     */
+    private void atualizarScoreTrecho(Long trechoId) {
+        List<Avaliacao> avaliacoes = avaliacaoRepo.buscarPorTrecho(trechoId);
+        if (avaliacoes.isEmpty()) return;
+
+        double media = avaliacoes.stream().mapToDouble(Avaliacao::getNotaGeral).average().orElse(0.0);
+        Trecho trecho = trechoRepo.buscarPorId(trechoId)
+                .orElseThrow(() -> new RecursoNaoEncontradoException("Trecho nao encontrado"));
+        trecho.setScoreMedio(media);
+        trecho.setTotalAvaliacoes(avaliacoes.size());
+        trechoRepo.salvar(trecho);
+    }
+
+    /**
+     * CHANGE 073 - Limpa entradas de cache relacionadas a um trecho
+     */
+    private void limparCachePorTrecho(Long trechoId) {
+        cacheRotas.entrySet().removeIf(entry -> {
+            RotaDTO rota = entry.getValue();
+            return rota.getPontos().stream().anyMatch(p -> p.getId().equals(trechoId));
+        });
+    }
+
+    /**
+     * CHANGE 074 - Classifica score em categoria
+     */
+    private String classificarScore(double score) {
+        if (score >= 4.5) return "EXCELENTE";
+        if (score >= 3.5) return "BOM";
+        if (score >= 2.5) return "REGULAR";
+        if (score >= 1.5) return "RUIM";
+        return "PERIGOSO";
+    }
+
+    /**
+     * CHANGE 075 - Implementacao interna de notificacao desktop
+     */
+    private static class DesktopNotificationServiceImpl implements NotificacaoService {
+        @Override
+        public void enviarNotificacao(String titulo, String mensagem) {
+            // CHANGE 076 - Implementacao usando java.awt.SystemTray ou JavaFX
+            System.out.println("[NOTIFICACAO] " + titulo + ": " + mensagem);
+        }
+    }
+}
